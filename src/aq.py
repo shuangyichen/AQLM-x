@@ -61,11 +61,14 @@ class QuantizedWeight(nn.Module):
 
         self.out_group_size, self.in_group_size = out_group_size, in_group_size
         self.num_codebooks = num_codebooks
-        self.nbits_per_codebook = nbits_per_codebook
-        self.codebook_size = codebook_size = 2**nbits_per_codebook
+        self.nbits_per_codebook = [nbits_per_codebook-2, nbits_per_codebook]
+        self.codebook_size = [2**x for x in self.nbits_per_codebook] 
+        #self.codebook_size = [2**(nbits_per_codebook-2), 2**nbits_per_codebook]
         self.codebook_value_nbits = codebook_value_nbits
         self.codebook_value_num_groups = codebook_value_num_groups
         self.codebook_value_clusters = None
+        print("codebook_value_nbits",codebook_value_nbits)
+        print("nbits_per_codebook",nbits_per_codebook)
 
         self.scales = self.scales_clusters = self.scales_indices = None
         if straight_through_gradient is None and scale_nbits > 0:
@@ -259,10 +262,13 @@ class QuantizedWeight(nn.Module):
         group_size = self.out_group_size * self.in_group_size
         num_out_groups = self.out_features // self.out_group_size
         num_in_groups = self.in_features // self.in_group_size
+        sum_nbits_codebook = sum(self.nbits_per_codebook)
+        # matrix_store = num_parameters // group_size * self.num_codebooks * self.nbits_per_codebook
+        matrix_store = num_parameters // group_size * sum_nbits_codebook
 
-        matrix_store = num_parameters // group_size * self.num_codebooks * self.nbits_per_codebook
-
-        codebooks_store = self.num_codebooks * self.codebook_size * group_size * self.codebook_value_nbits
+        # avg_codebook_size = float(sum(self.codebook_size) / len(self.codebook_size))
+        # codebooks_store = self.num_codebooks * self.codebook_size * group_size * self.codebook_value_nbits
+        codebooks_store = sum_nbits_codebook * group_size * self.codebook_value_nbits
         if self.codebook_value_nbits < 16:
             codebooks_store += (
                 2**self.codebook_value_nbits * self.num_codebooks * self.codebook_value_num_groups * group_size * 16
@@ -277,6 +283,9 @@ class QuantizedWeight(nn.Module):
             scale_store = num_out_groups * 16
         else:
             assert False
+            
+        # return sum((matrix_store + codebooks_store[i] + scale_store) / num_parameters for i in range(len(codebooks_store)))
+
 
         return (matrix_store + codebooks_store + scale_store) / num_parameters
 
@@ -306,6 +315,7 @@ def init_aq_kmeans(
     :params max_point_per_centorid maximum data point per cluster
     :param kwargs: any additional params are forwarded to fit_kmeans
     """
+    print("init_aq_kmeans")
     out_features, in_features = reference_weight.shape
     num_out_groups = out_features // out_group_size
     num_in_groups = in_features // in_group_size
@@ -321,36 +331,46 @@ def init_aq_kmeans(
     if max_points_per_centroid is not None:
         print("Clustering:", max_points_per_centroid * codebook_size, "points from", weight_residue.shape[0])
 
+    i=0
     for _ in trange(num_codebooks, desc="initializing with kmeans") if verbose else range(num_codebooks):
         if use_faiss:
             codebook_i, codes_i, reconstructed_weight_i = fit_faiss_kmeans(
                 weight_residue,
-                k=codebook_size,
+                k=codebook_size[i],
                 max_iter=max_iter,
                 gpu=(weight_residue.device.type == "cuda"),
                 max_points_per_centroid=max_points_per_centroid,
             )
         else:
+            print(2)
             chosen_ids = None
             if max_points_per_centroid is not None:
                 chosen_ids = torch.randperm(weight_residue.shape[0], device=weight_residue.device)[
-                    : max_points_per_centroid * codebook_size
+                    : max_points_per_centroid * codebook_size[i]
                 ]
             codebook_i, _, _ = fit_kmeans(
                 weight_residue if chosen_ids is None else weight_residue[chosen_ids, :],
-                k=codebook_size,
+                k=codebook_size[i],
                 max_iter=max_iter,
                 devices=devices,
                 **kwargs,
             )
+
             codes_i, reconstructed_weight_i = find_nearest_cluster(weight_residue, codebook_i, devices=devices)
 
         codes_i = codes_i.reshape(num_out_groups, num_in_groups, 1)
-        codebook_i = codebook_i.reshape(1, codebook_size, out_group_size, in_group_size)
+        codebook_i = codebook_i.reshape(1, codebook_size[i], out_group_size, in_group_size)
+        pad_size = 256 - codebook_i.size(1)
+        if pad_size > 0:
+            codebook_i = F.pad(codebook_i, (0, 0, 0, 0, 0,  pad_size))
         weight_residue -= reconstructed_weight_i
+
         codes.append(codes_i)
         codebooks.append(codebook_i)
         del reconstructed_weight_i
+        i +=1
     codebooks = torch.cat(codebooks, dim=0)
+    # print("concat codebooks shape", codebooks.shape)
     codes = torch.cat(codes, dim=-1)
+    print("finish Init with kmeans")
     return codes, codebooks

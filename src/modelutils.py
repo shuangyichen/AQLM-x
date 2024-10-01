@@ -50,7 +50,7 @@ def get_model(
 ):
     if dtype == "auto":
         dtype = (
-            AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code).torch_dtype or "auto"
+            AutoConfig.from_pretrained(model_path,cache_dir="/scratch/ssd004/scratch/chensy/model/", trust_remote_code=trust_remote_code).torch_dtype or "auto"
         )  # force transformers 4.29.2 to follow the same rules as 4.30.x
     elif isinstance(dtype, str):
         dtype = getattr(torch, dtype)
@@ -62,6 +62,7 @@ def get_model(
 
     with suspend_nn_inits():
         model = AutoModelForCausalLM.from_pretrained(
+            cache_dir="/scratch/ssd004/scratch/chensy/model/",
             pretrained_model_name_or_path=model_path,
             trust_remote_code=trust_remote_code,
             torch_dtype=dtype,

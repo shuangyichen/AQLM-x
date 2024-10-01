@@ -224,7 +224,7 @@ def get_loaders(
             )
     else:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_path, use_fast=use_fast_tokenizer, trust_remote_code=trust_remote_code
+            model_path, cache_dir="/scratch/ssd004/scratch/chensy/model/",use_fast=use_fast_tokenizer, trust_remote_code=trust_remote_code
         )
 
         if name.lower() == "wikitext2":

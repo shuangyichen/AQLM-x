@@ -64,6 +64,9 @@ class AQEngine(nn.Module):
         differentiable_parameters = nn.ParameterDict(
             {name: param for name, param in self.quantized_weight.named_parameters() if param.requires_grad}
         )
+        # for name, param in self.quantized_weight.named_parameters():
+        #     if param.requires_grad:
+        #         print("requires_grad parameter name", name)
         opt = torch.optim.Adam(differentiable_parameters.values(), lr=args.lr, betas=(0.0, 0.95), amsgrad=True)
 
         replicas = None
@@ -89,6 +92,12 @@ class AQEngine(nn.Module):
 
                 opt.zero_grad()
                 loss.backward()
+                # print(differentiable_parameters)
+                if "codebook" in differentiable_parameters.keys():
+                    with torch.no_grad():
+                        differentiable_parameters.codebook.weight.grad[1, 64:, :, :] = 0
+                    
+                
                 opt.step()
                 if verbose and (epoch * args.steps_per_epoch + step) % args.print_frequency == 0:
                     print(f"epoch={epoch}\tstep={step}\tloss={loss.item():.10f}\t")

@@ -32,7 +32,8 @@ try:
     has_wandb = True
 except ModuleNotFoundError:
     has_wandb = False
-
+from huggingface_hub import login
+login(token='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')
 
 def quantize_model(model: PreTrainedModel, args: Namespace):
     """main entry point to functions for model quantization"""
