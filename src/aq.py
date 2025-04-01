@@ -197,16 +197,26 @@ class QuantizedWeight(nn.Module):
     def shape(self) -> Tuple[int, int]:
         return self.out_features, self.in_features
 
-    def forward(self, selection: Union[slice, ellipsis, torch.Tensor] = ...):
+    def forward(self, selection: Union[slice, ellipsis, torch.Tensor] = ..., num_codebooks: Optional[int] = None):
         """
         Differentably reconstruct the weight (or parts thereof) from compressed components
         :param selection: By default, reconstruct the entire weight. If selection is specified, this method will instead
             reconstruct a portion of weight for the corresponding output dimensions (used for parallelism).
             The indices / slices must correspond to output channels (if out_group_size==1) or groups (if > 1).
             Formally, the indices must be in range [ 0 , self.out_features // self.out_group_size )
-
+        :param num_codebooks: Number of codebooks to use for reconstruction. If None, all codebooks are used.
+            If specified, only the first `num_codebooks` will be used.
         """
-        weight = _dequantize_weight(self.get_codes()[selection], self.get_codebooks(), self.get_scales()[selection])
+        # 检查 num_codebooks 参数
+        if num_codebooks is not None:
+            num_codebooks = min(num_codebooks, self.num_codebooks)
+        
+        weight = _dequantize_weight(
+            self.get_codes()[selection], 
+            self.get_codebooks(), 
+            self.get_scales()[selection],
+            num_codebooks
+        )
         return weight
 
     @torch.no_grad()

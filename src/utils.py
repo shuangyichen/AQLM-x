@@ -61,35 +61,98 @@ def maybe_script(fn: callable) -> callable:
     return torch.jit.script(fn) if should_script else fn
 
 
+# @maybe_script
+# def _dequantize_weight(
+#     codes: torch.Tensor, codebooks: torch.Tensor, scales: Optional[torch.Tensor] = None
+# ) -> torch.Tensor:
+#     """
+#     Decode float weights from quantization codes. Differentiable.
+#     :param codes: tensor of integer quantization codes, shape [*dims, num_out_groups, num_in_groups, num_codebooks]
+#     :param codebooks: tensor of vectors for each quantization code, [num_codebooks, codebook_size, out_group_size, in_group_size]
+#     :param scales: weight will be multiplied by this factor, must be broadcastble with [*dims, out_groups, num_in_groups, out_group_size, in_group_size]
+#     :return: reconstructed weight tensor of shape [*dims, num_in_groups*group_size]
+#     """
+#     num_out_groups, num_in_groups, num_codebooks = codes.shape[-3:]
+#     num_codebooks, codebook_size, out_group_size, in_group_size = codebooks.shape
+#     out_features = num_out_groups * out_group_size
+#     in_features = num_in_groups * in_group_size
+#     codebook_offsets = torch.arange(
+#         0, num_codebooks * codebook_size, codebook_size, device=codes.device
+#     )  # shape: [num_codebooks]
+#     reconstructed_weight_flat = F.embedding_bag(
+#         codes.flatten(0, -2) + codebook_offsets, codebooks.flatten(0, 1).flatten(-2, -1), mode="sum"
+#     )  # [prod(dims) * num_out_groups * num_in_groups, out_group_size * in_group_size]
+
+#     reconstructed_weight_groupwise = reconstructed_weight_flat.view(
+#         list(codes.shape[:-3]) + [num_out_groups, num_in_groups, out_group_size, in_group_size]
+#     )
+#     if scales is not None:
+#         reconstructed_weight_groupwise = reconstructed_weight_groupwise.mul(scales)
+#     return reconstructed_weight_groupwise.swapaxes(-3, -2).reshape(list(codes.shape[:-3]) + [out_features, in_features])
+
 @maybe_script
 def _dequantize_weight(
-    codes: torch.Tensor, codebooks: torch.Tensor, scales: Optional[torch.Tensor] = None
+    codes: torch.Tensor, codebooks: torch.Tensor, scales: Optional[torch.Tensor] = None, num_codebooks: Optional[int] = None
 ) -> torch.Tensor:
     """
     Decode float weights from quantization codes. Differentiable.
     :param codes: tensor of integer quantization codes, shape [*dims, num_out_groups, num_in_groups, num_codebooks]
     :param codebooks: tensor of vectors for each quantization code, [num_codebooks, codebook_size, out_group_size, in_group_size]
     :param scales: weight will be multiplied by this factor, must be broadcastble with [*dims, out_groups, num_in_groups, out_group_size, in_group_size]
+    :param num_codebooks: Number of codebooks to use. If None, all available codebooks are used.
     :return: reconstructed weight tensor of shape [*dims, num_in_groups*group_size]
     """
-    num_out_groups, num_in_groups, num_codebooks = codes.shape[-3:]
-    num_codebooks, codebook_size, out_group_size, in_group_size = codebooks.shape
-    out_features = num_out_groups * out_group_size
-    in_features = num_in_groups * in_group_size
-    codebook_offsets = torch.arange(
-        0, num_codebooks * codebook_size, codebook_size, device=codes.device
-    )  # shape: [num_codebooks]
-    reconstructed_weight_flat = F.embedding_bag(
-        codes.flatten(0, -2) + codebook_offsets, codebooks.flatten(0, 1).flatten(-2, -1), mode="sum"
-    )  # [prod(dims) * num_out_groups * num_in_groups, out_group_size * in_group_size]
+    # 使用所有可用的 codebook 或仅使用指定数量的 codebook
+    available_codebooks = codebooks.shape[0]
+    effective_num_codebooks = available_codebooks if num_codebooks is None else min(num_codebooks, available_codebooks)
+    
+    # 如果要使用所有 codebook，使用原始方法
+    if effective_num_codebooks == available_codebooks:
+        num_out_groups, num_in_groups, _ = codes.shape[-3:]
+        _, codebook_size, out_group_size, in_group_size = codebooks.shape
+        out_features = num_out_groups * out_group_size
+        in_features = num_in_groups * in_group_size
+        codebook_offsets = torch.arange(
+            0, available_codebooks * codebook_size, codebook_size, device=codes.device
+        )  # shape: [num_codebooks]
+        reconstructed_weight_flat = F.embedding_bag(
+            codes.flatten(0, -2) + codebook_offsets, codebooks.flatten(0, 1).flatten(-2, -1), mode="sum"
+        )  # [prod(dims) * num_out_groups * num_in_groups, out_group_size * in_group_size]
 
-    reconstructed_weight_groupwise = reconstructed_weight_flat.view(
-        list(codes.shape[:-3]) + [num_out_groups, num_in_groups, out_group_size, in_group_size]
-    )
-    if scales is not None:
-        reconstructed_weight_groupwise = reconstructed_weight_groupwise.mul(scales)
-    return reconstructed_weight_groupwise.swapaxes(-3, -2).reshape(list(codes.shape[:-3]) + [out_features, in_features])
+        reconstructed_weight_groupwise = reconstructed_weight_flat.view(
+            list(codes.shape[:-3]) + [num_out_groups, num_in_groups, out_group_size, in_group_size]
+        )
+        if scales is not None:
+            reconstructed_weight_groupwise = reconstructed_weight_groupwise.mul(scales)
+        return reconstructed_weight_groupwise.swapaxes(-3, -2).reshape(list(codes.shape[:-3]) + [out_features, in_features])
+    
+    # 使用部分 codebook
+    else:
+        num_out_groups, num_in_groups, _ = codes.shape[-3:]
+        _, codebook_size, out_group_size, in_group_size = codebooks.shape
+        out_features = num_out_groups * out_group_size
+        in_features = num_in_groups * in_group_size
+        
+        # 只使用前 effective_num_codebooks 个 codebook
+        selected_codes = codes[..., :effective_num_codebooks]
+        selected_codebooks = codebooks[:effective_num_codebooks]
+        
+        codebook_offsets = torch.arange(
+            0, effective_num_codebooks * codebook_size, codebook_size, device=codes.device
+        )  # shape: [effective_num_codebooks]
+        
+        reconstructed_weight_flat = F.embedding_bag(
+            selected_codes.flatten(0, -2) + codebook_offsets, 
+            selected_codebooks.flatten(0, 1).flatten(-2, -1), 
+            mode="sum"
+        )  # [prod(dims) * num_out_groups * num_in_groups, out_group_size * in_group_size]
 
+        reconstructed_weight_groupwise = reconstructed_weight_flat.view(
+            list(codes.shape[:-3]) + [num_out_groups, num_in_groups, out_group_size, in_group_size]
+        )
+        if scales is not None:
+            reconstructed_weight_groupwise = reconstructed_weight_groupwise.mul(scales)
+        return reconstructed_weight_groupwise.swapaxes(-3, -2).reshape(list(codes.shape[:-3]) + [out_features, in_features])
 
 @contextlib.contextmanager
 def using_tf32(enabled: bool):

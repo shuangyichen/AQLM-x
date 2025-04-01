@@ -105,6 +105,9 @@ class AQEngine(nn.Module):
             )
         return self.quantized_weight
 
+
+
+
     def _compute_mse(self, selection: Union[slice, ellipsis] = ...) -> torch.Tensor:
         """
         Compute the activation MSE error = ||X @ quantized_weight - X @ reference_weight||^2
@@ -114,21 +117,55 @@ class AQEngine(nn.Module):
             The indices / slices must correspond to output channels (if out_group_size==1) or groups (if > 1).
             Formally, the indices must be in range [ 0 , self.out_features // self.out_group_size )
         """
-        assert self.quantized_weight is not None, "must be called inside / after AQUtil.quantize"
-        quantized_weight = self.quantized_weight(selection)
+        # assert self.quantized_weight is not None, "must be called inside / after AQUtil.quantize"
+        # quantized_weight = self.quantized_weight(selection)
 
+        # if isinstance(selection, ellipsis):
+        #     reference_weight = self.layer.weight.detach().to(quantized_weight.dtype)
+        # else:
+        #     assert isinstance(selection, slice)
+        #     out_channel_selection = slice(
+        #         selection.start * self.quantized_weight.out_group_size,
+        #         selection.stop * self.quantized_weight.out_group_size,
+        #     )
+
+        #     reference_weight = self.layer.weight.detach()[out_channel_selection].to(quantized_weight.dtype)
+        # delta_weight = (quantized_weight - reference_weight).to(self.XTX.dtype)
+        # return (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
+
+        assert self.quantized_weight is not None, "必须在 AQUtil.quantize 内部/之后调用"
+    
+    # 获取参考权重
         if isinstance(selection, ellipsis):
-            reference_weight = self.layer.weight.detach().to(quantized_weight.dtype)
+            reference_weight = self.layer.weight.detach().to(self.quantized_weight.codebooks.dtype)
         else:
             assert isinstance(selection, slice)
             out_channel_selection = slice(
                 selection.start * self.quantized_weight.out_group_size,
                 selection.stop * self.quantized_weight.out_group_size,
             )
+            reference_weight = self.layer.weight.detach()[out_channel_selection].to(self.quantized_weight.codebooks.dtype)
+        
+        # 计算总的 codebook 数量
+        total_codebooks = self.quantized_weight.num_codebooks
+        total_loss = torch.tensor(0.0, device=self.device, dtype=self.XTX.dtype)
+        
+        # 对每个渐进式阶段计算 MSE
+        for i in range(1, total_codebooks + 1):
+            # 获取使用前 i 个 codebook 的量化权重
+            quantized_weight_i = self.quantized_weight(selection, num_codebooks=i)
+            
+            # 计算当前阶段的 MSE
+            delta_weight = (quantized_weight_i - reference_weight).to(self.XTX.dtype)
+            mse_i = (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
+            
+            # 添加到总损失
+            total_loss = total_loss + mse_i
+        
+        return total_loss
 
-            reference_weight = self.layer.weight.detach()[out_channel_selection].to(quantized_weight.dtype)
-        delta_weight = (quantized_weight - reference_weight).to(self.XTX.dtype)
-        return (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
+
+
 
     def _replace_and_compute_mse(self, params_to_replace: nn.ParameterDict, selection: slice) -> torch.Tensor:
         """Utility for parallelism: replace the specified parameters of self.quantized_weight, then compute MSE"""
