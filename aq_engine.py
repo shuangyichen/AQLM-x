@@ -105,6 +105,82 @@ class AQEngine(nn.Module):
             )
         return self.quantized_weight
 
+
+    def _compute_mse(self, selection: Union[slice, ellipsis] = ...) -> torch.Tensor:
+        """
+        Compute the activation MSE error = ||X @ quantized_weight - X @ reference_weight||^2
+        Use the square-of-difference formula to avoid materializing per-batch predictions
+        :param selection:  By default, compute MSE normally. If selection is specified, this method will instead
+            compute MSE over a portion of output channels that align with the selected out_groups (for parallelism)
+            The indices / slices must correspond to output channels (if out_group_size==1) or groups (if > 1).
+            Formally, the indices must be in range [ 0 , self.out_features // self.out_group_size )
+        """
+        assert self.quantized_weight is not None, "必须在 AQUtil.quantize 内部/之后调用"
+    
+    # 获取参考权重
+        if isinstance(selection, ellipsis):
+            reference_weight = self.layer.weight.detach().to(self.quantized_weight.codebooks.dtype)
+        else:
+            assert isinstance(selection, slice)
+            out_channel_selection = slice(
+                selection.start * self.quantized_weight.out_group_size,
+                selection.stop * self.quantized_weight.out_group_size,
+            )
+            reference_weight = self.layer.weight.detach()[out_channel_selection].to(self.quantized_weight.codebooks.dtype)
+        
+        # 计算总的 codebook 数量
+        total_codebooks = self.quantized_weight.num_codebooks
+
+        # initial codebooks get more weight/priority - decreasing liz 
+        #codebook_weights = torch.exp(-0.5 * torch.arange(total_codebooks, device=self.device, dtype=self.XTX.dtype)) #liz
+        # For 7 codebooks: [1.0000, 0.6065, 0.3679, 0.2231, 0.1353, 0.0821, 0.0498]
+
+        # later codebooks get more weight/priority - increasing liz 
+        #codebook_weights = torch.exp(0.5 * torch.arange(total_codebooks, device=self.device, dtype=self.XTX.dtype))
+        
+        # reverse of increasing - liz
+        #codebook_weights = torch.exp(0.5 * torch.arange(total_codebooks-1, -1, -1, device=self.device, dtype=self.XTX.dtype))
+        #For 7 codebooks: [20.0855, 12.1825,  7.3891,  4.4817,  2.7183,  1.6487,  1.0000]
+
+        #pcw - increasing - liz
+        #codebook_weights = torch.tensor([1,1,10,20,30], device=self.device, dtype=self.XTX.dtype)
+
+        #revpcw - liz
+        #codebook_weights = torch.tensor([1,1,100,200,300], device=self.device, dtype=self.XTX.dtype)
+        
+        #gemma-weights - liz
+        #codebook_weights = torch.tensor([1000,  1000, 10,   0.1, 0.1], device=self.device, dtype=self.XTX.dtype)
+
+        #gemma-weights2 - liz
+        #codebook_weights = torch.tensor([1000,  1000, 1000, 0.1, 0.1], device=self.device, dtype=self.XTX.dtype)
+
+        #extreme12NORMALIZED -liz
+        #codebook_weights = torch.tensor([1,1, 0.01,  0.0001, 0.00011], device=self.device, dtype=self.XTX.dtype)
+
+
+        total_loss = torch.tensor(0.0, device=self.device, dtype=self.XTX.dtype)
+        
+        # 对每个渐进式阶段计算 MSE
+        for i in range(1, total_codebooks + 1):
+            # 获取使用前 i 个 codebook 的量化权重
+            quantized_weight_i = self.quantized_weight(selection, num_codebooks=i)
+            
+            # 计算当前阶段的 MSE
+            delta_weight = (quantized_weight_i - reference_weight).to(self.XTX.dtype)
+            mse_i = (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
+            
+            # Ensure all tensors are on the same device before computation
+            mse_i = mse_i.to(self.device)
+            #codebook_weight = codebook_weights[i-1].to(self.device)
+            
+            # 添加到总损失
+            total_loss = total_loss + mse_i
+            #total_loss = total_loss + codebook_weight* mse_i #liz
+
+        return total_loss
+
+
+    # Original: from AQLM Vahe
     def _compute_mse(self, selection: Union[slice, ellipsis] = ...) -> torch.Tensor:
         """
         Compute the activation MSE error = ||X @ quantized_weight - X @ reference_weight||^2
