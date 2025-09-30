@@ -210,12 +210,14 @@ class QuantizedWeight(nn.Module):
         # 检查 num_codebooks 参数
         if num_codebooks is not None:
             num_codebooks = min(num_codebooks, self.num_codebooks)
-        
+
+        # FOR DROP-BY-DROP's INFERENCE, modify num_codebooks (i.e. num_codebooks = 3) to simulate "dropping" of codebooks without any
+        # additional retraining or finetuning. Just load the quantized model through $SAVE_PATH in the shell script.
         weight = _dequantize_weight(
             self.get_codes()[selection], 
             self.get_codebooks(), 
             self.get_scales()[selection],
-            num_codebooks
+            num_codebooks                
         )
         return weight
 
