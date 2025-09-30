@@ -1,17 +1,20 @@
-export CUDA_VISIBLE_DEVICES=0,1   # or e.g. 0,1,2,3
-export MODEL_PATH=/model-weights/gemma-2b     # /scratch/ssd004/scratch/chensy/hf_home/models--meta-llama--Llama-2-7b-hf/blobs/2ef41cbc275000b29afe157ba487f0530b8c26dc
-export DATASET_PATH=pajama
-export SAVE_PATH=/scratch/ssd004/scratch/chensy/AQLM-x/
-# export WANDB_PROJECT=MY_AQ_EXPS
-# export WANDB_NAME=COOL_EXP_NAME
+#!/bin/bash
+#SBATCH --job-name=quantize
+#SBATCH --output=slurm-%j-MAT35-gemma2b.out
+#SBATCH --error=slurm-%j-MAT35-gemma2b.err
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export MODEL_PATH=/model-weights/gemma-2b/    
+export DATASET_PATH=wikitext2
+export SAVE_PATH=/project/aip-khisti/babaogl4/vaughan/5x8-MAT35-gemma2b
 
 python main.py $MODEL_PATH $DATASET_PATH \
  --nsamples=1024 \
  --val_size=32 \
- --num_codebooks=2 \
+ --num_codebooks=5 \
  --nbits_per_codebook=8 \
  --in_group_size=8 \
- --relative_mse_tolerance=0.005 \
+ --relative_mse_tolerance=0.01 \
  --finetune_batch_size=32 \
  --finetune_max_epochs=10 \
  --finetune_early_stop=3 \
@@ -20,3 +23,18 @@ python main.py $MODEL_PATH $DATASET_PATH \
  --offload_activations \
  --resume \
  --save $SAVE_PATH
+
+# python main.py $MODEL_PATH $DATASET_PATH \
+#  --nsamples=1024 \
+#  --val_size=32 \
+#  --num_codebooks=5 \
+#  --nbits_per_codebook=8 \
+#  --in_group_size=8 \
+#  --relative_mse_tolerance=0.01 \
+#  --finetune_batch_size=32 \
+#  --finetune_max_epochs=10 \
+#  --finetune_early_stop=3 \
+#  --finetune_keep_best \
+#  --local_batch_size=1 \
+#  --offload_activations \
+#  --load /project/aip-khisti/babaogl4/vaughan/5x8-MAT35-gemma2b
