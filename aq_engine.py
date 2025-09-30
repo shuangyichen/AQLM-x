@@ -105,9 +105,7 @@ class AQEngine(nn.Module):
             )
         return self.quantized_weight
 
-
-
-
+    ### modified _compute_mse for DropbyDrop
     def _compute_mse(self, selection: Union[slice, ellipsis] = ...) -> torch.Tensor:
         """
         Compute the activation MSE error = ||X @ quantized_weight - X @ reference_weight||^2
@@ -132,10 +130,9 @@ class AQEngine(nn.Module):
         #     reference_weight = self.layer.weight.detach()[out_channel_selection].to(quantized_weight.dtype)
         # delta_weight = (quantized_weight - reference_weight).to(self.XTX.dtype)
         # return (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
-
+        
         assert self.quantized_weight is not None, "必须在 AQUtil.quantize 内部/之后调用"
-    
-    # 获取参考权重
+
         if isinstance(selection, ellipsis):
             reference_weight = self.layer.weight.detach().to(self.quantized_weight.codebooks.dtype)
         else:
@@ -146,25 +143,29 @@ class AQEngine(nn.Module):
             )
             reference_weight = self.layer.weight.detach()[out_channel_selection].to(self.quantized_weight.codebooks.dtype)
         
-        # 计算总的 codebook 数量
         total_codebooks = self.quantized_weight.num_codebooks
-        total_loss = torch.tensor(0.0, device=self.device, dtype=self.XTX.dtype)
         
-        # 对每个渐进式阶段计算 MSE
+        # EXAMPLE - 35W 
+        codebook_weights = torch.tensor([0,0, 0.5,  0, 0.5], device=self.device, dtype=self.XTX.dtype)
+
+        total_loss = torch.tensor(0.0, device=self.device, dtype=self.XTX.dtype)
+
+        # Inspired by Matryoshka Representation Learning
         for i in range(1, total_codebooks + 1):
-            # 获取使用前 i 个 codebook 的量化权重
+            
             quantized_weight_i = self.quantized_weight(selection, num_codebooks=i)
             
-            # 计算当前阶段的 MSE
             delta_weight = (quantized_weight_i - reference_weight).to(self.XTX.dtype)
             mse_i = (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
             
-            # 添加到总损失
-            total_loss = total_loss + mse_i
-        
+            # Ensure all tensors are on the same device before computation
+            mse_i = mse_i.to(self.device)
+            codebook_weight = codebook_weights[i-1].to(self.device)
+            
+            #total_loss = total_loss + mse_i
+            total_loss = total_loss + codebook_weight* mse_i 
+
         return total_loss
-
-
 
 
     def _replace_and_compute_mse(self, params_to_replace: nn.ParameterDict, selection: slice) -> torch.Tensor:
