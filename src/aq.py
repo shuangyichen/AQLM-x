@@ -208,16 +208,17 @@ class QuantizedWeight(nn.Module):
         :param num_codebooks: Number of codebooks to use for reconstruction. If None, all codebooks are used.
             If specified, only the first `num_codebooks` will be used.
         """
-        # 检查 num_codebooks 参数
+        # check num_codebooks
         if num_codebooks is not None:
-            #print(f"[QuantizedWeight.forward] self.num_codebooks: {self.num_codebooks}")
             num_codebooks = min(num_codebooks, self.num_codebooks)
-        #print(f"[QuantizedWeight.forward] effective_num_codebooks: {num_codebooks}")
+
+        # FOR DROP-BY-DROP's INFERENCE, modify num_codebooks (i.e. num_codebooks = 3) to simulate "dropping" of codebooks without any
+        # additional retraining or finetuning. Just load the quantized model through $SAVE_PATH in the shell script.
         weight = _dequantize_weight(
             self.get_codes()[selection], 
             self.get_codebooks(), 
             self.get_scales()[selection],
-            num_codebooks, # FOR INFERENCE TIME: ex: set num_codebooks=3
+            num_codebooks                
         )
         return weight
 
