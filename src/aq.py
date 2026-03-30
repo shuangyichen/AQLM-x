@@ -222,7 +222,7 @@ class QuantizedWeight(nn.Module):
         )
         return weight
 
-    # Original: from Vahe
+    # Original: from AQLM
     # def forward(self, selection: Union[slice, ellipsis, torch.Tensor] = ...):
     #     """
     #     Differentably reconstruct the weight (or parts thereof) from compressed components
