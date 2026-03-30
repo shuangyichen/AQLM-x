@@ -6,7 +6,7 @@
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export MODEL_PATH=/model-weights/gemma-2b/    
 export DATASET_PATH=wikitext2
-export SAVE_PATH=/project/aip-khisti/babaogl4/vaughan/5x8-MAT35-gemma2b
+export SAVE_PATH=ANONYMOUS
 
 python main.py $MODEL_PATH $DATASET_PATH \
  --nsamples=1024 \
@@ -37,4 +37,4 @@ python main.py $MODEL_PATH $DATASET_PATH \
 #  --finetune_keep_best \
 #  --local_batch_size=1 \
 #  --offload_activations \
-#  --load /project/aip-khisti/babaogl4/vaughan/5x8-MAT35-gemma2b
+#  --load ANONYMOUS
