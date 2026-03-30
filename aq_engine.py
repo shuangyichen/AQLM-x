@@ -131,7 +131,7 @@ class AQEngine(nn.Module):
         # delta_weight = (quantized_weight - reference_weight).to(self.XTX.dtype)
         # return (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
         
-        assert self.quantized_weight is not None, "必须在 AQUtil.quantize 内部/之后调用"
+        assert self.quantized_weight is not None, "must be called inside / after AQUtil.quantize"
 
         if isinstance(selection, ellipsis):
             reference_weight = self.layer.weight.detach().to(self.quantized_weight.codebooks.dtype)
