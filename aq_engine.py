@@ -12,6 +12,32 @@ from torch.nn.parallel.scatter_gather import Gather
 from src.aq import QuantizedWeight
 from src.utils import ellipsis
 
+import matplotlib.pyplot as plt 
+import numpy as np 
+from sklearn.decomposition import PCA 
+_layer_counter = 0 
+
+
+def next_power_of_2(n):
+    return 1 << (n - 1).bit_length()
+
+
+def fast_walsh_hadamard_transform(X):
+    """Vectorized FWHT — no Python loops over elements."""
+    d = X.shape[-1]
+    assert (d & (d - 1)) == 0, "Dimension must be a power of 2"
+    X = X.clone()
+    h = 1
+    while h < d:
+        X = X.view(*X.shape[:-1], d // (2 * h), 2, h)
+        x0 = X[..., 0, :].clone()
+        x1 = X[..., 1, :].clone()
+        X[..., 0, :] = x0 + x1
+        X[..., 1, :] = x0 - x1
+        X = X.view(*X.shape[:-3], d)
+        h *= 2
+    return X / (d ** 0.5)
+
 
 class AQEngine(nn.Module):
     """A wrapper class that runs AQ training for a single linear layer. All the important math is in aq.py"""
@@ -33,6 +59,7 @@ class AQEngine(nn.Module):
         assert self.XTX is not None, "Already ran quantization; cannot add more data batches"
         if len(inp.shape) == 3:
             inp = inp.reshape((-1, inp.shape[-1]))
+
         tmp = inp.shape[0]
         inp = inp.t()
 
@@ -41,11 +68,50 @@ class AQEngine(nn.Module):
         inp = math.sqrt(1 / self.nsamples) * inp.to(self.XTX.dtype)
         self.XTX += inp.matmul(inp.t())
 
+
     @torch.enable_grad()
     def quantize(self, *, args: Namespace, verbose: bool = True) -> QuantizedWeight:
         """create a QuantizedLinear with specified args based on the collected hessian (XTX) data"""
         assert isinstance(args.devices, (list, tuple)) and len(args.devices) >= 1, f"Found devices = {args.devices}"
         assert args.devices[0] == self.device, (args.devices[0], self.XTX.device)
+
+        ### For the Block FWHT
+        d_in = self.columns
+        self.W_raw = self.layer.weight.data.clone().float()
+
+        # Find largest power of 2 that divides d_in exactly, capped at 256
+        BLOCK = 1
+        for b in [256, 128, 64, 32]:
+            if d_in % b == 0:
+                BLOCK = b
+                break
+        self.block_size = BLOCK
+        self.signs = torch.randint(0, 2, (d_in,), device=self.device) * 2 - 1
+
+        if BLOCK > 1:
+            W_signed = self.W_raw * self.signs.unsqueeze(0)          # [out, d_in]
+            W_blocks = W_signed.view(-1, d_in // BLOCK, BLOCK)       # [out, nblocks, BLOCK]
+            W_rotated = fast_walsh_hadamard_transform(W_blocks).view(-1, d_in)
+            self.layer.weight.data = W_rotated.to(dtype=self.layer.weight.dtype)
+
+            XTX_raw = self.XTX.clone().float()
+            XTX_signed = XTX_raw * self.signs.unsqueeze(0) * self.signs.unsqueeze(1)
+            XTX_out = torch.zeros_like(XTX_signed)
+            for i in range(d_in // BLOCK):
+                s, e = i * BLOCK, (i + 1) * BLOCK
+                block = XTX_signed[s:e, s:e]
+                XTX_out[s:e, s:e] = fast_walsh_hadamard_transform(
+                    fast_walsh_hadamard_transform(block).T
+                ).T
+            self.XTX = XTX_out.to(dtype=self.XTX.dtype)
+            # if verbose:
+            #     print(f"[Rotation Engine] Applied block-Hadamard (d_in={d_in}, BLOCK={BLOCK}, nblocks={d_in // BLOCK}).")
+        else:
+            self.signs = None
+            # if verbose:
+            #     print(f"[Rotation Engine] Skipped — d_in={d_in} not divisible by any supported block size.")
+        ###
+
         self.quantized_weight = QuantizedWeight(
             reference_weight=self.layer.weight.detach().to(device=self.device, dtype=torch.float32),
             out_group_size=args.out_group_size,
@@ -59,8 +125,8 @@ class AQEngine(nn.Module):
             max_points_per_centroid=args.init_max_points_per_centroid,
             devices=args.devices,
             verbose=True,
-        )
-
+        )   
+        
         differentiable_parameters = nn.ParameterDict(
             {name: param for name, param in self.quantized_weight.named_parameters() if param.requires_grad}
         )
@@ -103,9 +169,10 @@ class AQEngine(nn.Module):
                 beam_size=args.beam_size,
                 verbose=True,
             )
+
         return self.quantized_weight
 
-    ### modified _compute_mse for DropbyDrop
+    # modified for DropbyDrop
     def _compute_mse(self, selection: Union[slice, ellipsis] = ...) -> torch.Tensor:
         """
         Compute the activation MSE error = ||X @ quantized_weight - X @ reference_weight||^2
@@ -115,24 +182,8 @@ class AQEngine(nn.Module):
             The indices / slices must correspond to output channels (if out_group_size==1) or groups (if > 1).
             Formally, the indices must be in range [ 0 , self.out_features // self.out_group_size )
         """
-        # assert self.quantized_weight is not None, "must be called inside / after AQUtil.quantize"
-        # quantized_weight = self.quantized_weight(selection)
-
-        # if isinstance(selection, ellipsis):
-        #     reference_weight = self.layer.weight.detach().to(quantized_weight.dtype)
-        # else:
-        #     assert isinstance(selection, slice)
-        #     out_channel_selection = slice(
-        #         selection.start * self.quantized_weight.out_group_size,
-        #         selection.stop * self.quantized_weight.out_group_size,
-        #     )
-
-        #     reference_weight = self.layer.weight.detach()[out_channel_selection].to(quantized_weight.dtype)
-        # delta_weight = (quantized_weight - reference_weight).to(self.XTX.dtype)
-        # return (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
-        
-        assert self.quantized_weight is not None, "must be called inside / after AQUtil.quantize"
-
+        assert self.quantized_weight is not None, "必须在 AQUtil.quantize 内部/之后调用"
+    
         if isinstance(selection, ellipsis):
             reference_weight = self.layer.weight.detach().to(self.quantized_weight.codebooks.dtype)
         else:
@@ -144,29 +195,52 @@ class AQEngine(nn.Module):
             reference_weight = self.layer.weight.detach()[out_channel_selection].to(self.quantized_weight.codebooks.dtype)
         
         total_codebooks = self.quantized_weight.num_codebooks
-        
-        # EXAMPLE - 35W 
+               
+        #gemma-weights
+        #codebook_weights = torch.tensor([1000,  1000, 10,   0.1, 0.1], device=self.device, dtype=self.XTX.dtype)
+
+        #gemma-weights2 
+        #codebook_weights = torch.tensor([1000,  1000, 1000, 0.1, 0.1], device=self.device, dtype=self.XTX.dtype)
+
+        #Uni
+        #codebook_weights = torch.tensor([0.2,0.2, 0.2, 0.2, 0.2], device=self.device, dtype=self.XTX.dtype)
+
+        #35W 
         codebook_weights = torch.tensor([0,0, 0.5,  0, 0.5], device=self.device, dtype=self.XTX.dtype)
 
-        total_loss = torch.tensor(0.0, device=self.device, dtype=self.XTX.dtype)
+        #34W 
+        #codebook_weights = torch.tensor([0,0, 0.5, 0.5], device=self.device, dtype=self.XTX.dtype)
 
-        # Inspired by Matryoshka Representation Learning
+        #234W 
+        #codebook_weights = torch.tensor([0,0.333, 0.333, 0.333], device=self.device, dtype=self.XTX.dtype)
+
+        #24W 
+        #codebook_weights = torch.tensor([0,0.5, 0, 0.5], device=self.device, dtype=self.XTX.dtype)
+
+        #345W
+        #codebook_weights = torch.tensor([0,0, 0.333,  0.333, 0.333], device=self.device, dtype=self.XTX.dtype)
+
+        total_loss = torch.tensor(0.0, device=self.device, dtype=self.XTX.dtype)
+        
         for i in range(1, total_codebooks + 1):
             
+            # Skip if weight is zero 
+            codebook_weight = codebook_weights[i - 1]
+            if codebook_weight.item() == 0: 
+                continue
             quantized_weight_i = self.quantized_weight(selection, num_codebooks=i)
             
             delta_weight = (quantized_weight_i - reference_weight).to(self.XTX.dtype)
             mse_i = (delta_weight @ self.XTX).flatten() @ delta_weight.flatten() / self.quantized_weight.out_features
-            
+
             # Ensure all tensors are on the same device before computation
             mse_i = mse_i.to(self.device)
-            codebook_weight = codebook_weights[i-1].to(self.device)
+            codebook_weight = codebook_weight.to(self.device)
             
             #total_loss = total_loss + mse_i
             total_loss = total_loss + codebook_weight* mse_i 
 
         return total_loss
-
 
     def _replace_and_compute_mse(self, params_to_replace: nn.ParameterDict, selection: slice) -> torch.Tensor:
         """Utility for parallelism: replace the specified parameters of self.quantized_weight, then compute MSE"""
