@@ -3,6 +3,7 @@ import time
 from argparse import Namespace
 from itertools import chain
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from xml.sax import handler
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,7 @@ from tqdm import trange
 from tqdm.auto import trange
 from transformers import PreTrainedModel
 
+from aq_engine import fast_walsh_hadamard_transform 
 from aq_engine import AQEngine
 from src.aq import QuantizedLinear
 from src.datautils import get_loaders
@@ -210,7 +212,7 @@ def quantize_aq(model: PreTrainedModel, data: Sequence, val_data: Optional[Seque
             layer_save_path = os.path.join(args.save, f"{layer_index}.pth")
             if os.path.exists(layer_save_path):
                 print(f"Loading layer {layer_index} from {layer_save_path}")
-                layer = torch.load(layer_save_path, map_location=args.devices[0])
+                layer = torch.load(layer_save_path, map_location=args.devices[0], weights_only=False) #liz
                 loaded_layer = True
 
         # prepare validation  outputs
@@ -262,14 +264,28 @@ def quantize_aq(model: PreTrainedModel, data: Sequence, val_data: Optional[Seque
                     else:
                         args.num_codebooks = num_codebooks
                     print(sublayer_name.lower(), " mixtral num codebooks", args.num_codebooks)
+
+                # 1. Pre-compute the Cholesky weights using the accumulated XTX
+                # aq_handlers[sublayer_name]._prepare_cholesky_weights(args) 
                 quantized_weight = aq_handlers[sublayer_name].quantize(args=args, verbose=True)
 
                 with torch.no_grad():
-                    assert aq_handlers[sublayer_name].layer.weight in set(
-                        layer.parameters()
-                    )  # test that this is not a replica
+                    handler = aq_handlers[sublayer_name]
 
-                    new_linear = QuantizedLinear(quantized_weight, aq_handlers[sublayer_name].layer.bias)
+                    handler.layer.weight.data = handler.W_raw.to(
+                        dtype=handler.layer.weight.dtype
+                    )
+
+                    assert handler.layer.weight in set(
+                        layer.parameters()
+                    )
+
+                    new_linear = QuantizedLinear(quantized_weight, handler.layer.bias)
+                    if handler.signs is not None:
+                        new_linear.register_buffer('rotation_signs', handler.signs)
+                        new_linear.rotation_d_in = handler.columns
+                        new_linear.rotation_block_size = handler.block_size
+
                     if args.use_checkpointing:
                         new_linear.use_checkpoint = True
                         print("ENABLED CHECKPOINTING FOR", sublayer_name)
@@ -278,9 +294,10 @@ def quantize_aq(model: PreTrainedModel, data: Sequence, val_data: Optional[Seque
                         for child_name, child_module in submodule.named_children():
                             if child_module is aq_handlers[sublayer_name].layer:
                                 setattr(submodule, child_name, new_linear)
-                                found_original = True  # note: do not break to handle tied layers
+                                found_original = True
 
                     assert found_original, f"could not find {sublayer_name}"
+                ########
 
                 weight_avg_bits = quantized_weight.estimate_nbits_per_parameter()
                 overall_bits += int(weight_avg_bits * torch.numel(aq_handlers[sublayer_name].layer.weight.data))
@@ -305,7 +322,6 @@ def quantize_aq(model: PreTrainedModel, data: Sequence, val_data: Optional[Seque
                     **forward_args,
                 )
             layer = layer.to(dtype=layer_dtype_original)
-            print("FINISHED FINETUNING")
 
         if args.save and not loaded_layer:
             os.makedirs(args.save, exist_ok=True)
@@ -372,6 +388,13 @@ def quantize_aq(model: PreTrainedModel, data: Sequence, val_data: Optional[Seque
 @torch.no_grad()
 def perplexity_eval(model: PreTrainedModel, testenc: torch.LongTensor, args: Namespace) -> float:
     print(f"\nEvaluating perplexity for {args.dataset_name} dataset ...")
+
+    from src.aq import QuantizedLinear
+    for name, module in model.named_modules():
+        if isinstance(module, QuantizedLinear):
+            has_signs = hasattr(module, 'rotation_signs')
+            print(f"  {name}: has rotation_signs = {has_signs}")
+            break  # just check the first one
 
     nsamples = testenc.numel() // args.model_seqlen
 
@@ -907,7 +930,8 @@ def main():
             trust_remote_code=args.trust_remote_code,
         )
         args.dataset_name = dataset
-        perplexity_eval(model, testloader, args)
+        perplexity_eval(model, testloader, args) #liz removed, added the following:
+        #evaluate_with_timing(model, testloader, args) # liz added
 
     print(f"eval: {torch.cuda.max_memory_allocated()=:,}")
     if args.wandb:
