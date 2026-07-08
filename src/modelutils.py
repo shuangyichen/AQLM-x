@@ -47,11 +47,46 @@ def dispatch_quantized_model(model):
 
 def get_model(
     model_path, load_quantized=None, dtype="auto", device_map=None, attn_implementation=None, trust_remote_code=False
-):
+):  
     if dtype == "auto":
-        dtype = (
-            AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code).torch_dtype or "auto"
-        )  # force transformers 4.29.2 to follow the same rules as 4.30.x
+        # --- FAILSAFE LLAMA PATCH START ---
+        from transformers import LlamaConfig, AutoConfig
+        import json
+        import os
+
+        config_file = os.path.join(model_path, "config.json")
+        
+        if os.path.exists(config_file):
+            with open(config_file, "r") as f:
+                config_dict = json.load(f)
+            
+            # Remove the complex RoPE scaling that causes the ValueError in old versions
+            if "rope_scaling" in config_dict:
+                rs = config_dict["rope_scaling"]
+                if isinstance(rs, dict) and ("rope_type" in rs or "low_freq_factor" in rs):
+                    print("Simplifying Llama 3.1 RoPE scaling for compatibility...")
+                    config_dict["rope_scaling"] = {
+                        "type": "linear",
+                        "factor": float(rs.get("factor", 8.0))
+                    }
+            
+            # Use the specific LlamaConfig class instead of AutoConfig
+            try:
+                config = LlamaConfig(**config_dict)
+            except Exception:
+                # If LlamaConfig also fails, we'll try to force AutoConfig one last way
+                config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+        else:
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+        
+        dtype = config.torch_dtype or "auto"
+        # --- FAILSAFE LLAMA PATCH END ---
+
+    # original
+    # if dtype == "auto":
+    #     dtype = (
+    #         AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code).torch_dtype or "auto"
+    #     )  # force transformers 4.29.2 to follow the same rules as 4.30.x
     elif isinstance(dtype, str):
         dtype = getattr(torch, dtype)
 
@@ -221,14 +256,35 @@ def load_linear_layers(layer, quant_layer, model):
                                 child_module.weight.data = quant_child_module.weight.data.to(
                                     child_module.weight.dtype
                                 ).to(child_module.weight.device)
+                        
                             else:
                                 print(child_name)
+
+                                ### FWHT
+                                dequantized_weight = quant_child_module.quantized_weight()
+
+                                if hasattr(quant_child_module, "rotation_signs"):
+                                    from aq_engine import fast_walsh_hadamard_transform
+
+                                    d_in = quant_child_module.rotation_d_in
+                                    block_size = quant_child_module.rotation_block_size
+                                    signs = quant_child_module.rotation_signs.to(dequantized_weight.device).float()
+
+                                    # Step 1: apply FWHT (self-inverse)
+                                    w = dequantized_weight.float()
+                                    w_blocks = w.view(w.shape[0], d_in // block_size, block_size)
+                                    w_derotated = fast_walsh_hadamard_transform(w_blocks).view(w.shape[0], d_in)
+
+                                    # Step 2: undo sign flip (signs * signs = 1)
+                                    dequantized_weight = w_derotated * signs.unsqueeze(0)
+
                                 child_module.weight.data = (
-                                    quant_child_module.quantized_weight()
-                                    .data.to(child_module.weight.dtype)
+                                    dequantized_weight
+                                    .to(child_module.weight.dtype)
                                     .to(child_module.weight.device)
                                 )
-                            # Bias is not taked into account
+                                ### 
+
     return layer
 
 
@@ -238,7 +294,7 @@ def load_dequantized_model(model, load_path):
     for layer_index in range(len(layers)):
         print("layer", layer_index)
         layer = layers[layer_index]
-        quant_layer = torch.load(os.path.join(load_path, str(layer_index) + ".pth"), map_location="cpu")
+        quant_layer = torch.load(os.path.join(load_path, str(layer_index) + ".pth"), map_location="cpu", weights_only=False) # for eval do: , weights_only=False
         for module in quant_layer.modules():
             if isinstance(module, QuantizedWeight):
                 if not hasattr(module, "codes_storage"):
@@ -254,8 +310,8 @@ def load_quantized_model(model, load_path):
     for layer_index in range(len(model.model.layers)):
         model.model.layers[layer_index] = torch.load(
             os.path.join(load_path, str(layer_index) + ".pth"),
-            map_location=model.model.layers[layer_index].input_layernorm.weight.device,
-        )
+            map_location=model.model.layers[layer_index].input_layernorm.weight.device, weights_only=False 
+        ) #liz
         for module in model.model.layers[layer_index].modules():
             if isinstance(module, QuantizedWeight):
                 if not hasattr(module, "codes_storage"):
