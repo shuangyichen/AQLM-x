@@ -24,14 +24,24 @@ class QuantizedLinear(nn.Module):
         self.use_checkpoint = False
 
     def _forward(self, input: torch.Tensor):
+        if hasattr(self, 'rotation_signs'):
+            from aq_engine import fast_walsh_hadamard_transform
+            d_in = self.rotation_d_in
+            BLOCK = self.rotation_block_size
+            x = input.float()
+            x_signed = x * self.rotation_signs.to(x.device)
+            x_blocks = x_signed.view(*x.shape[:-1], d_in // BLOCK, BLOCK)
+            x_rotated = fast_walsh_hadamard_transform(x_blocks).view(*x.shape[:-1], d_in)
+            input = x_rotated.to(input.dtype)
         return F.linear(input, self.quantized_weight(), self.bias)
-
+    
     def forward(self, input: torch.Tensor):
         if getattr(self, "use_checkpoint", False) and torch.is_grad_enabled():
             return checkpoint(
                 self._forward, input, use_reentrant=False, preserve_rng_state=False, determinism_check="none"
             )
         return self._forward(input)
+
 
 
 class QuantizedWeight(nn.Module):
@@ -208,6 +218,7 @@ class QuantizedWeight(nn.Module):
         :param num_codebooks: Number of codebooks to use for reconstruction. If None, all codebooks are used.
             If specified, only the first `num_codebooks` will be used.
         """
+
         # check num_codebooks
         if num_codebooks is not None:
             num_codebooks = min(num_codebooks, self.num_codebooks)
@@ -218,8 +229,9 @@ class QuantizedWeight(nn.Module):
             self.get_codes()[selection], 
             self.get_codebooks(), 
             self.get_scales()[selection],
-            num_codebooks                
+            num_codebooks,               
         )
+
         return weight
 
     # Original: from AQLM
@@ -319,7 +331,7 @@ def init_aq_kmeans(
     in_group_size: int,
     codebook_size: int,
     verbose: bool = False,
-    use_faiss: bool = False,
+    use_faiss: bool = False, 
     max_points_per_centroid: Optional[int] = None,
     max_iter: int = 1000,
     devices: Optional[List[torch.device]] = None,
@@ -343,6 +355,7 @@ def init_aq_kmeans(
     )
     codebooks = []
     codes = []
+    
 
     if max_points_per_centroid is not None:
         print("Clustering:", max_points_per_centroid * codebook_size, "points from", weight_residue.shape[0])
