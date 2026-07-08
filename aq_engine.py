@@ -21,7 +21,6 @@ _layer_counter = 0
 def next_power_of_2(n):
     return 1 << (n - 1).bit_length()
 
-
 def fast_walsh_hadamard_transform(X):
     """Vectorized FWHT — no Python loops over elements."""
     d = X.shape[-1]
