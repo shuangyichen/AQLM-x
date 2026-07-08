@@ -573,8 +573,7 @@ def update_outs(
             out_losses.append(outs_batch_loss.item())
         outs_tensor[j].copy_(outs_batch.reshape_as(outs_tensor[j]), non_blocking=True)
     return out_losses
-
-
+    
 @torch.no_grad()
 def update_outs_parallel(
     devices: Sequence[torch.device],
